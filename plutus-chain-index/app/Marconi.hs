@@ -1,7 +1,8 @@
-{-# LANGUAGE NamedFieldPuns    #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TupleSections     #-}
-
+{-# LANGUAGE GADTs               #-}
+{-# LANGUAGE NamedFieldPuns      #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections       #-}
 module Main where
 
 import Cardano.Api (Block (Block), BlockHeader (BlockHeader), BlockInMode (BlockInMode), CardanoMode,
@@ -9,9 +10,11 @@ import Cardano.Api (Block (Block), BlockHeader (BlockHeader), BlockInMode (Block
                     NetworkMagic (NetworkMagic), SlotNo (SlotNo), Tx (Tx), chainPointToSlotNo,
                     deserialiseFromRawBytesHex, proxyToAsType)
 import Cardano.Api qualified as C
+import Cardano.Api.Shelley qualified as Shelley
 import Cardano.BM.Setup (withTrace)
 import Cardano.BM.Trace (logError)
 import Cardano.BM.Tracing (defaultConfigStdout)
+import Cardano.Ledger.Alonzo.Scripts qualified as Alonzo
 import Control.Concurrent (forkIO)
 import Control.Concurrent.QSemN (QSemN, newQSemN, signalQSemN, waitQSemN)
 import Control.Concurrent.STM (atomically)
@@ -20,6 +23,7 @@ import Control.Exception (catch)
 import Control.Lens.Operators ((&), (<&>), (^.))
 import Control.Monad (void, when)
 import Data.ByteString.Char8 qualified as C8
+import Data.ByteString.Short qualified as SBS
 import Data.Foldable (foldl')
 import Data.List (findIndex)
 import Data.Map (assocs)
@@ -29,10 +33,13 @@ import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.String (IsString)
 import Ledger (TxIn (..), TxOut (..), TxOutRef (..))
+import Ledger.Scripts as Ledger
 import Ledger.Tx.CardanoAPI (fromCardanoTxId, fromCardanoTxIn, fromCardanoTxOut, fromTxScriptValidity,
-                             scriptDataFromCardanoTxBody)
+                             scriptDataFromCardanoTxBody, withIsCardanoEra)
 import Marconi.Index.Datum (DatumIndex)
 import Marconi.Index.Datum qualified as Datum
+import Marconi.Index.ScriptTx ()
+import Marconi.Index.ScriptTx qualified as ScriptTx
 import Marconi.Index.Utxo (UtxoIndex, UtxoUpdate (..))
 import Marconi.Index.Utxo qualified as Utxo
 import Marconi.Logging (logging)
@@ -41,7 +48,6 @@ import Options.Applicative (Mod, OptionFields, Parser, auto, execParser, flag', 
 import Plutus.HystericalScreams.Index.VSplit qualified as Ix
 import Plutus.Streaming (ChainSyncEvent (RollBackward, RollForward), ChainSyncEventException (NoIntersectionFound),
                          withChainSyncEventStream)
-import Plutus.V1.Ledger.Api (Datum, DatumHash)
 import Prettyprinter (defaultLayoutOptions, layoutPretty, pretty, (<+>))
 import Prettyprinter.Render.Text (renderStrict)
 import Streaming.Prelude qualified as S
@@ -225,16 +231,72 @@ utxoWorker Coordinator{_barrier} ch path = Utxo.open path (Utxo.Depth 2160) >>= 
               offset <- findIndex  (\u -> (u ^. Utxo.slotNo) < slot) events
               Ix.rewind offset index
 
+scriptTxWorker
+  :: Coordinator
+  -> TChan (ChainSyncEvent (BlockInMode CardanoMode))
+  -> FilePath
+  -> IO ()
+scriptTxWorker Coordinator{_barrier} ch path = ScriptTx.open path (ScriptTx.Depth 2160) >>= loop
+  where
+    loop :: ScriptTx.ScriptTxIndex -> IO ()
+    loop index = do
+      signalQSemN _barrier 1
+      event <- atomically $ readTChan ch
+      case event of
+        RollForward (BlockInMode (Block (BlockHeader slotNo _ _) txs :: Block era) era :: BlockInMode CardanoMode) _ct -> do
+          withIsCardanoEra era (Ix.insert (toUpdate txs slotNo) index >>= loop)
+        RollBackward cp _ct -> do
+          events <- Ix.getEvents (index ^. Ix.storage)
+          loop $
+            fromMaybe index $ do
+              slot   <- chainPointToSlotNo cp
+              offset <- findIndex  (\u -> ScriptTx.slotNo u < slot) events
+              Ix.rewind offset index
+
+    toUpdate :: forall era . C.IsCardanoEra era => [Tx era] -> SlotNo -> ScriptTx.ScriptTxUpdate
+    toUpdate txs slotNo = ScriptTx.ScriptTxUpdate txScripts' slotNo
+      where
+        txScripts' = map (\tx -> (txCbor tx, txScripts tx)) txs
+
+    txCbor :: forall era . C.IsCardanoEra era => Tx era -> ScriptTx.TxCbor
+    txCbor tx = ScriptTx.TxCbor $ C.serialiseToCBOR tx
+
+    txScripts :: forall era . Tx era -> [ScriptTx.ScriptAddress]
+    txScripts tx = let
+        Tx (body :: C.TxBody era) _ws = tx
+        hashesMaybe :: [Maybe C.ScriptHash]
+        hashesMaybe = case body of
+          Shelley.ShelleyTxBody shelleyBasedEra _body scripts' _scriptData _auxData _validity ->
+              case shelleyBasedEra of
+                (C.ShelleyBasedEraAlonzo :: era0) -> map maybeScriptHash scripts'
+                _                                 -> []
+          _ -> []
+        hashes = catMaybes hashesMaybe :: [Shelley.ScriptHash]
+      in map ScriptTx.ScriptAddress hashes
+
+    maybeScriptHash :: Alonzo.Script era1 -> Maybe Shelley.ScriptHash
+    maybeScriptHash script = case script of
+      Alonzo.PlutusScript _ (sbs :: SBS.ShortByteString) -> let
+
+          -- | Use the ShortByteString to directly make a cardano-api script
+          mkCardanoApiScript :: SBS.ShortByteString -> C.Script (C.PlutusScriptV1)
+          mkCardanoApiScript = C.PlutusScript C.PlutusScriptV1 . Shelley.PlutusScriptSerialised
+
+          hash = C.hashScript $ mkCardanoApiScript sbs :: C.ScriptHash
+        in Just hash
+      _ -> Nothing
+
 combinedIndexer
   :: Maybe FilePath
   -> Maybe FilePath
+  -> Maybe FilePath
   -> S.Stream (S.Of (ChainSyncEvent (BlockInMode CardanoMode))) IO r
   -> IO ()
-combinedIndexer utxoPath datumPath = S.foldM_ step initial finish
+combinedIndexer utxoPath datumPath scriptTxPath = S.foldM_ step initial finish
   where
     initial :: IO Coordinator
     initial = do
-      let indexerCount = length . catMaybes $ [utxoPath, datumPath]
+      let indexerCount = length . catMaybes $ [utxoPath, datumPath, scriptTxPath]
       coordinator <- initialCoordinator indexerCount
       when (isJust datumPath) $ do
         ch <- atomically . dupTChan $ _channel coordinator
@@ -242,6 +304,9 @@ combinedIndexer utxoPath datumPath = S.foldM_ step initial finish
       when (isJust utxoPath) $ do
         ch <- atomically . dupTChan $ _channel coordinator
         void . forkIO . utxoWorker coordinator ch $ fromJust utxoPath
+      when (isJust scriptTxPath) $ do
+        ch <- atomically . dupTChan $ _channel coordinator
+        void . forkIO . scriptTxWorker coordinator ch $ fromJust scriptTxPath
       pure coordinator
 
     step :: Coordinator -> ChainSyncEvent (BlockInMode CardanoMode) -> IO Coordinator
@@ -269,7 +334,7 @@ main = do
       optionsSocketPath
       optionsNetworkId
       optionsChainPoint
-      (combinedIndexer optionsUtxoPath optionsDatumPath . logging trace)
+      (combinedIndexer optionsUtxoPath optionsDatumPath optionsScriptTxPath . logging trace)
       `catch` \NoIntersectionFound ->
         logError trace $
           renderStrict $
