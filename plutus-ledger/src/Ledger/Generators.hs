@@ -386,7 +386,7 @@ validateMockchain (Mockchain txPool _ params) cardanoTx = result where
     cUtxoIndex = either (error . show) id $ Validation.fromPlutusIndex params idx
     ctx = ValidationCtx idx params
     (err, _) = cardanoTx & Ledger.mergeCardanoTxWith
-            (\tx -> Index.runValidation (Index.validateTransaction h tx) ctx)
+            (\tx -> undefined) -- Index.runValidation (Index.validateTransaction h tx) ctx)
             (\(CardanoApiEmulatorEraTx tx) -> (Validation.hasValidationErrors params (fromIntegral h) cUtxoIndex tx, []))
             (\(e1, sve1) (e2, sve2) -> (e1 <|> e2, sve1 ++ sve2))
     result = fmap snd err
@@ -419,7 +419,7 @@ genTxInfo chain = do
     let tx = Ledger.onCardanoTx id (\_ -> error "Unexpected SomeCardanoApiTx") cardanoTx
         idx = UtxoIndex $ mockchainUtxo chain
         params = mockchainParams chain
-        (res, _) = runWriter $ runExceptT $ runReaderT (_runValidation (Index.mkPV1TxInfo tx)) (ValidationCtx idx params)
+        (res, _) = undefined -- runWriter $ runExceptT $ runReaderT (_runValidation (Index.mkPV1TxInfo tx)) (ValidationCtx idx params)
     either (const Gen.discard) pure res
 
 genScriptPurposeSpending :: MonadGen m => TxInfo -> m Contexts.ScriptPurpose
