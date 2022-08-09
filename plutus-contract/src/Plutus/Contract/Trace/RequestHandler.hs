@@ -91,7 +91,7 @@ tryHandler' ::
 tryHandler' (RequestHandler h) requests =
     foldM (\e i -> fmap (e <|>) $ fmap join $ NonDet.makeChoiceA @f $ h i) empty requests
 
-extract :: Alternative f => Prism' a b -> a -> f b
+extract :: Prism' a b -> a -> Maybe b
 extract p = maybe empty pure . preview p
 
 -- | Generalise a request handler

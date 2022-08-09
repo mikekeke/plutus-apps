@@ -94,7 +94,7 @@ startNodeClient config instancesState = do
         env' <-
           if useMarconiIndexer
           then do
-            utxoIx <- Ix.open (unpack dbFile) (Ix.Depth 2160) >>= newIORef
+            utxoIx <- Ix.open (unpack dbFile) (Ix.Depth 8) >>= newIORef
             pure $ env { beTxChanges = Right utxoIx }
           else do
             pure env
