@@ -11,12 +11,17 @@ module MarconiSpec where
 -- of the function's output.
 
 import Hedgehog
-import Hedgehog.Gen qualified as Gen
-import Hedgehog.Range qualified as Range
-import Test.Tasty (TestTree, defaultMain, testGroup)
+-- import Hedgehog.Gen qualified as Gen
+-- import Hedgehog.Range qualified as Range
+import Test.Tasty (TestTree, testGroup)
 -- import Test.Tasty.Hedgehog (testPropertyNamed)
 import Test.Tasty.Hedgehog (testProperty)
 
+import Marconi.Index.ScriptTx ()
+
 tests :: TestTree
 tests = testGroup "marconi"
-  [ testProperty "prop_script_hashes_in_tx_match" undefined ]
+  [ testProperty "prop_script_hashes_in_tx_match" testTxScripts]
+
+testTxScripts :: Property
+testTxScripts = undefined

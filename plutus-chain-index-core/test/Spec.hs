@@ -42,6 +42,9 @@ import Test.Tasty.Hedgehog (testProperty)
 main :: IO ()
 main = defaultMain tests
 
+hot :: IO ()
+hot = defaultMain $ testGroup "hot" [ MarconiSpec.tests ]
+
 tests :: TestTree
 tests =
   testGroup "tests"
