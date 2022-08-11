@@ -1,4 +1,3 @@
-{-# LANGUAGE GADTs               #-}
 {-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -10,11 +9,9 @@ import Cardano.Api (Block (Block), BlockHeader (BlockHeader), BlockInMode (Block
                     NetworkMagic (NetworkMagic), SlotNo (SlotNo), Tx (Tx), chainPointToSlotNo,
                     deserialiseFromRawBytesHex, proxyToAsType)
 import Cardano.Api qualified as C
-import Cardano.Api.Shelley qualified as Shelley
 import Cardano.BM.Setup (withTrace)
 import Cardano.BM.Trace (logError)
 import Cardano.BM.Tracing (defaultConfigStdout)
-import Cardano.Ledger.Alonzo.Scripts qualified as Alonzo
 import Control.Concurrent (forkIO)
 import Control.Concurrent.QSemN (QSemN, newQSemN, signalQSemN, waitQSemN)
 import Control.Concurrent.STM (atomically)
@@ -23,7 +20,7 @@ import Control.Exception (catch)
 import Control.Lens.Operators ((&), (<&>), (^.))
 import Control.Monad (void, when)
 import Data.ByteString.Char8 qualified as C8
-import Data.ByteString.Short qualified as SBS
+
 import Data.Foldable (foldl')
 import Data.List (findIndex)
 import Data.Map (assocs)
@@ -244,7 +241,7 @@ scriptTxWorker Coordinator{_barrier} ch path = ScriptTx.open path (ScriptTx.Dept
       event <- atomically $ readTChan ch
       case event of
         RollForward (BlockInMode (Block (BlockHeader slotNo _ _) txs :: Block era) era :: BlockInMode CardanoMode) _ct -> do
-          withIsCardanoEra era (Ix.insert (toUpdate txs slotNo) index >>= loop)
+          withIsCardanoEra era (Ix.insert (ScriptTx.toUpdate txs slotNo) index >>= loop)
         RollBackward cp _ct -> do
           events <- Ix.getEvents (index ^. Ix.storage)
           loop $
@@ -252,39 +249,6 @@ scriptTxWorker Coordinator{_barrier} ch path = ScriptTx.open path (ScriptTx.Dept
               slot   <- chainPointToSlotNo cp
               offset <- findIndex  (\u -> ScriptTx.slotNo u < slot) events
               Ix.rewind offset index
-
-    toUpdate :: forall era . C.IsCardanoEra era => [Tx era] -> SlotNo -> ScriptTx.ScriptTxUpdate
-    toUpdate txs slotNo = ScriptTx.ScriptTxUpdate txScripts' slotNo
-      where
-        txScripts' = map (\tx -> (txCbor tx, txScripts tx)) txs
-
-    txCbor :: forall era . C.IsCardanoEra era => Tx era -> ScriptTx.TxCbor
-    txCbor tx = ScriptTx.TxCbor $ C.serialiseToCBOR tx
-
-    txScripts :: forall era . Tx era -> [ScriptTx.ScriptAddress]
-    txScripts tx = let
-        Tx (body :: C.TxBody era) _ws = tx
-        hashesMaybe :: [Maybe C.ScriptHash]
-        hashesMaybe = case body of
-          Shelley.ShelleyTxBody shelleyBasedEra _body scripts' _scriptData _auxData _validity ->
-              case shelleyBasedEra of
-                (C.ShelleyBasedEraAlonzo :: era0) -> map maybeScriptHash scripts'
-                _                                 -> []
-          _ -> []
-        hashes = catMaybes hashesMaybe :: [Shelley.ScriptHash]
-      in map ScriptTx.ScriptAddress hashes
-
-    maybeScriptHash :: Alonzo.Script era1 -> Maybe Shelley.ScriptHash
-    maybeScriptHash script = case script of
-      Alonzo.PlutusScript _ (sbs :: SBS.ShortByteString) -> let
-
-          -- | Use the ShortByteString to directly make a cardano-api script
-          mkCardanoApiScript :: SBS.ShortByteString -> C.Script (C.PlutusScriptV1)
-          mkCardanoApiScript = C.PlutusScript C.PlutusScriptV1 . Shelley.PlutusScriptSerialised
-
-          hash = C.hashScript $ mkCardanoApiScript sbs :: C.ScriptHash
-        in Just hash
-      _ -> Nothing
 
 combinedIndexer
   :: Maybe FilePath

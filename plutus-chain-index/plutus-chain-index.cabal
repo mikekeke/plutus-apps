@@ -127,7 +127,6 @@ executable marconi
     , base                       >=4.9 && <5
     , bytestring
     , cardano-api
-    , cardano-ledger-alonzo
     , containers
     , iohk-monitoring
     , lens

@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE DerivingStrategies         #-}
+{-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
@@ -8,13 +9,17 @@
 module Marconi.Index.ScriptTx where
 
 import Cardano.Api (SlotNo)
+import Cardano.Api qualified as C
+import Cardano.Ledger.Alonzo.Scripts qualified as Alonzo
+import Data.ByteString.Short qualified as SBS
+
 import Cardano.Api.Shelley qualified as Shelley
 import Codec.Serialise (deserialiseOrFail)
 import Control.Lens.Operators ((^.))
 import Data.ByteString qualified as BS
 
 import Data.Foldable (forM_)
-import Data.Maybe (fromJust)
+import Data.Maybe (catMaybes, fromJust)
 import Database.SQLite.Simple qualified as SQL
 import Database.SQLite.Simple.FromField qualified as SQL
 import Database.SQLite.Simple.ToField qualified as SQL
@@ -62,6 +67,38 @@ data ScriptTxUpdate = ScriptTxUpdate
   } deriving (Show)
 
 type ScriptTxIndex = SqliteIndex ScriptTxUpdate () Query Result
+
+
+toUpdate :: forall era . C.IsCardanoEra era => [C.Tx era] -> SlotNo -> ScriptTxUpdate
+toUpdate txs = ScriptTxUpdate txScripts'
+  where
+    txScripts' = map (\tx -> (TxCbor $ C.serialiseToCBOR tx, getTxScripts tx)) txs
+
+getTxScripts :: forall era . C.Tx era -> [ScriptAddress]
+getTxScripts tx = let
+    C.Tx (body :: C.TxBody era) _ws = tx
+    hashesMaybe :: [Maybe C.ScriptHash]
+    hashesMaybe = case body of
+      Shelley.ShelleyTxBody shelleyBasedEra _body scripts' _scriptData _auxData _validity ->
+          case shelleyBasedEra of
+            (C.ShelleyBasedEraAlonzo :: era0) -> map maybeScriptHash scripts'
+            _                                 -> []
+      _ -> []
+    hashes = catMaybes hashesMaybe :: [Shelley.ScriptHash]
+  in map ScriptAddress hashes
+
+  where
+    maybeScriptHash :: Alonzo.Script era1 -> Maybe Shelley.ScriptHash
+    maybeScriptHash script = case script of
+      Alonzo.PlutusScript _ (sbs :: SBS.ShortByteString) -> let
+
+          -- | Use the ShortByteString to directly make a cardano-api script
+          mkCardanoApiScript :: SBS.ShortByteString -> C.Script C.PlutusScriptV1
+          mkCardanoApiScript = C.PlutusScript C.PlutusScriptV1 . Shelley.PlutusScriptSerialised
+
+          hash = C.hashScript $ mkCardanoApiScript sbs :: C.ScriptHash
+        in Just hash
+      _ -> Nothing
 
 open :: FilePath -> Depth -> IO ScriptTxIndex
 open dbPath (Depth k) = do

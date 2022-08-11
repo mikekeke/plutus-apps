@@ -86,6 +86,7 @@ library
   --------------------------
   build-depends:
     , cardano-api
+    , cardano-ledger-alonzo
     , cardano-ledger-byron
     , io-classes
     , iohk-monitoring
