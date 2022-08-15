@@ -26,7 +26,7 @@ Decision
 --------
 
 * We will add ``Maybe ScriptHash`` as a new data constructor parameter for the constraints ``MustPayToPubKeyAddress``, ``MustPayToOtherScript``, ``ScriptOutputConstraint`` in ``TxConstraints``.
-  In the offchain implementation of those constraints, if a reference script hash is provided, we will need to find actual script in the lookups table so that we can include it in the transaction output.
+  In the off-chain implementation of those constraints, if a reference script hash is provided, we will need to find the actual script in the lookups table so that we can include it in the transaction output.
   In the PlutusV1 on-chain implementation of the constraint, we will return ``False`` if a reference script is provided because the ledger forbids using Babbage era features with PlutusV1.
   The PlutusV2 on-chain implementation of the constraint is trivial.
 
